@@ -2,7 +2,7 @@
 1. 检查摄像头是否连接以及设备信息
 
     - ```lsusb```
-    显示：```Bus 001 Device 003: ID 174f:2411 Syntek HD WebCam```说明连接成功
+    显示：```Bus 001 Device 003: ID 174f:2411 Syntek HD WebCam```或```Bus 001 Device 003: ID 1bcf:0b1d Sunplus Innovation Technology Inc. GAT-6.0-Z```说明连接成功
 
 2. 查看摄像头画面
 
@@ -24,13 +24,13 @@
 
 3. 摄像头控制命令
 
-    - 查看设备路径及对应的摄像头信息: ```sudo v4l2-ctl --list-devices```
+    - 查看设备路径及对应的摄像头信息: ```sudo v4l2-ctl --list-devices```。通常一个摄像头有两个，用前面的一个。
 
     - 查看摄像头支持的格式和分辨率: ```sudo v4l2-ctl -d /dev/video21 --list-formats-ext```
 
     - 用v4l2-ctl直接捕获一帧图像: ```sudo v4l2-ctl -d /dev/video21 --stream-mmap --stream-count=1 --stream-to=test_frame.jpg```
 
-    - 查看设备占用信息：```sudo lsof | grep /dev/video20```
+    - 查看设备占用信息：```sudo lsof | grep /dev/video21```
     
     
 

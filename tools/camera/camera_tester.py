@@ -1,115 +1,135 @@
 import cv2
+import os
 import time
-import argparse
+from datetime import datetime
 
-def get_camera_resolutions(cap):
-    """获取摄像头支持的所有分辨率"""
-    resolutions = []
-    # 尝试常见的分辨率，从高到低
-    common_resolutions = [
-        (3840, 2160),  # 4K
-        (2560, 1440),  # 2K
-        (1920, 1080),  # 1080p
-        (1280, 720),   # 720p
-        (1024, 768),
-        (800, 600),
-        (640, 480),    # VGA
-        (320, 240)     # QVGA
+def capture_frames(device_path='/dev/video20'):
+    # 创建保存图像和视频的目录
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = f"output/camera_captures_{timestamp}"
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"数据将保存到目录: {output_dir}")
+
+    # 定义MJPG格式下的所有配置 (分辨率和帧率)
+    configurations = [
+        # 960x720 分辨率的各种帧率
+        (960, 720, 60),
+        (960, 720, 40),
+        (960, 720, 30),
+        # 640x480 分辨率的各种帧率
+        (640, 480, 60),
+        (640, 480, 40),
+        (640, 480, 30)
     ]
     
-    # 检查每个分辨率是否被支持
-    for width, height in common_resolutions:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        
-        # 读取实际设置的分辨率
-        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        
-        if (actual_width, actual_height) == (width, height):
-            resolutions.append((width, height))
-    
-    return resolutions
+    # 存储每个配置的帧率统计结果
+    fps_results = []
 
-def test_max_fps(cap, width, height, test_duration=5):
-    """测试特定分辨率下的最大帧率"""
-    # 设置分辨率
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    
-    # 确保分辨率设置正确
-    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if (actual_width, actual_height) != (width, height):
-        return 0.0
-    
-    print(f"测试分辨率: {width}x{height}...")
-    
-    # 开始测试
-    start_time = time.time()
-    frame_count = 0
-    
-    while time.time() - start_time < test_duration:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame_count += 1
-    
-    elapsed_time = time.time() - start_time
-    fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-    
-    return fps
+    # 遍历所有配置并捕获视频
+    for idx, (width, height, target_fps) in enumerate(configurations):
+        print(f"\n处理配置 {idx+1}/{len(configurations)}: {width}x{height} @ {target_fps}fps")
+        
+        # 打开摄像头
+        cap = cv2.VideoCapture(device_path)
+        if not cap.isOpened():
+            print(f"❌ 无法打开摄像头设备: {device_path}")
+            continue
 
-def main():
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description='测试摄像头支持的最大分辨率和帧率')
-    parser.add_argument('--device', type=int, default=20, help='摄像头设备编号，默认为0')
-    args = parser.parse_args()
+        try:
+            # 设置摄像头参数
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_FPS, target_fps)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            
+            # 获取实际设置的参数
+            actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_target_fps = cap.get(cv2.CAP_PROP_FPS)
+            
+            print(f"设置: {actual_width}x{actual_height} @ {actual_target_fps:.1f}fps (目标: {target_fps}fps)")
+
+            # 定义视频编写器
+            video_filename = f"{output_dir}/video_{actual_width}x{actual_height}_{target_fps}fps.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(video_filename, fourcc, target_fps, (actual_width, actual_height))
+
+            # 捕获5秒钟的视频
+            start_time = time.time()
+            frame_count = 0
+            duration = 5  # 捕获时长(秒)
+            
+            print(f"开始捕获 {duration} 秒视频...")
+            while (time.time() - start_time) < duration:
+                ret, frame = cap.read()
+                if ret:
+                    # 写入视频
+                    out.write(frame)
+                    frame_count += 1
+                    # 每10帧打印一次进度
+                    if frame_count % 10 == 0:
+                        elapsed = time.time() - start_time
+                        print(f"已捕获 {frame_count} 帧 ({elapsed:.1f}s/{duration}s)", end='\r')
+                else:
+                    print(f"\n⚠️  无法捕获帧 (第 {frame_count+1} 帧)")
+                    break
+
+            # 计算实际帧率
+            elapsed_time = time.time() - start_time
+            actual_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+            
+            # 保存最后一帧作为图片
+            if frame_count > 0:
+                last_frame_filename = f"{output_dir}/last_frame_{actual_width}x{actual_height}_{target_fps}fps.jpg"
+                cv2.imwrite(last_frame_filename, frame)
+                print(f"\n已保存最后一帧: {last_frame_filename}")
+
+            # 保存视频
+            out.release()
+            print(f"已保存视频: {video_filename}")
+            
+            # 记录结果
+            fps_results.append({
+                'width': actual_width,
+                'height': actual_height,
+                'target_fps': target_fps,
+                'actual_fps': actual_fps,
+                'frame_count': frame_count,
+                'duration': elapsed_time
+            })
+            
+            print(f"统计: 实际帧率 = {actual_fps:.2f}fps ({frame_count} 帧 / {elapsed_time:.2f} 秒)")
+
+        except Exception as e:
+            print(f"处理时出错: {str(e)}")
+        
+        finally:
+            # 释放摄像头资源
+            cap.release()
+
+    # 生成并打印汇总报告
+    print("\n" + "="*60)
+    print("📊 摄像头性能测试汇总报告")
+    print("="*60)
+    print(f"测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"设备路径: {device_path}")
+    print(f"保存目录: {output_dir}")
+    print("-"*60)
+    # 表头设置更精确的宽度
+    print(f"{'分辨率':<12} {'目标FPS':<10} {'实际FPS':<10} {'捕获帧数':<10} {'时长(秒)':<10}")
+    print("-" * 52)  # 调整分隔线长度匹配表头
+
+    for result in fps_results:
+        # 每个字段设置固定宽度，确保对齐
+        print(f"{result['width']}x{result['height']:<8} "
+            f"{result['target_fps']:<10} "
+            f"{result['actual_fps']:10.2f}"
+            f"{result['frame_count']:<10} "
+            f"{result['duration']:.2f}")
     
-    # 打开摄像头
-    cap = cv2.VideoCapture(args.device)
-    if not cap.isOpened():
-        print(f"无法打开摄像头设备 {args.device}")
-        return
-    
-    print(f"成功打开摄像头设备 {args.device}")
-    print("正在检测支持的分辨率...")
-    
-    # 获取所有支持的分辨率
-    resolutions = get_camera_resolutions(cap)
-    
-    if not resolutions:
-        print("未检测到任何支持的分辨率")
-        cap.release()
-        return
-    
-    print(f"检测到 {len(resolutions)} 种支持的分辨率:")
-    for res in resolutions:
-        print(f"  {res[0]}x{res[1]}")
-    
-    # 测试每种分辨率的帧率
-    print("\n正在测试各分辨率下的帧率...")
-    results = []
-    
-    for width, height in resolutions:
-        fps = test_max_fps(cap, width, height)
-        results.append((width, height, fps))
-        print(f"  {width}x{height}: {fps:.2f} FPS")
-    
-    # 找出最大分辨率
-    max_res = max(resolutions, key=lambda x: x[0] * x[1])
-    max_res_fps = next(fps for w, h, fps in results if (w, h) == max_res)
-    
-    # 找出最高帧率
-    max_fps_entry = max(results, key=lambda x: x[2])
-    
-    print("\n测试结果总结:")
-    print(f"最大分辨率: {max_res[0]}x{max_res[1]} ({max_res_fps:.2f} FPS)")
-    print(f"最高帧率: {max_fps_entry[2]:.2f} FPS ({max_fps_entry[0]}x{max_fps_entry[1]})")
-    
-    # 释放资源
-    cap.release()
-    print("\n测试完成")
+    print("="*60)
+    print("所有配置的视频捕获完成")
 
 if __name__ == "__main__":
-    main()
+    # 可以修改为您的摄像头设备路径
+    capture_frames('/dev/video21')
