@@ -16,12 +16,13 @@ from hailo_platform import (
     OutputVStreamParams,
     VDevice,
 )
+import cv2
 
 # -------------------------- 配置参数 --------------------------
 noisy_dir = '/home/firefly/Denoising/data/20250113'  # 输入噪声图像目录
-output_dir = '/home/firefly/Denoising-rk3588J/output/20250113_output_dncnn_v0'  # 并行处理输出目录
+output_dir = '/home/firefly/Denoising-rk3588J/output/20250113_output_dncnn_v0_sharpened'  # 并行处理输出目录
 hef_path = '/home/firefly/Denoising-rk3588J/models/dncnn_v0/dncnn_bs3.hef'  # Hailo模型路径
-batch_size = 2  # 每个设备的批次大小
+batch_size = 1  # 每个设备的批次大小
 input_shape = (3, 720, 960)  # (channel, height, width)
 NUM_DEVICES = 2  # 使用两个加速棒
 
@@ -61,6 +62,7 @@ def save_image(tensor, filepath):
     
     # 转换为uint8并保存
     tensor = np.clip(tensor, 0, 255).astype(np.uint8)
+    tensor = sharpen_image(tensor)
     Image.fromarray(tensor).save(filepath)
     save_time = time.time() - start_time
     return save_time
@@ -159,7 +161,10 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
             
             # 执行推理
             output_tensor, infer_time = run_inference(device, batch_tensor)
-            
+            output_tensor = output_tensor.astype(np.float32)
+            k = 1.6213
+            b = -83.278
+            output_tensor = k * output_tensor + b
             # 保存结果并统计保存时间
             save_times = []
             for i in range(len(output_paths)):
@@ -179,6 +184,12 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
             device['target'].release()
         print(f"设备 {device_id} 工作进程已退出")
 
+def sharpen_image(image):
+    kernel = np.array([[0, -1, 0],
+                        [-1, 5, -1],
+                        [0, -1, 0]])
+    sharpened = cv2.filter2D(image, -1, kernel)
+    return sharpened
 
 # -------------------------- 主流程 --------------------------
 def main():

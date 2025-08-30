@@ -27,10 +27,10 @@ VIDEO_FORMAT = cv2.VideoWriter_fourcc(*"MJPG")  # 摄像头格式（MJPG支持�
 
 # 推理参数
 HEF_PATH = "/home/firefly/Denoising-rk3588J/models/dncnn_v0/dncnn_bs3.hef"  # Hailo模型路径
-BATCH_SIZE = 2                        # 单设备批次大小（平衡实时性与效率）
+BATCH_SIZE = 1                        # 单设备批次大小（平衡实时性与效率）
 INPUT_SHAPE = (3, 720, 960)          # 模型输入形状 (channel, height, width)
 NUM_DEVICES = 2                       # 启用的Hailo加速棒数量
-QUEUE_MAX_SIZE = 10                   # 任务队列最大缓存（避免帧堆积）
+QUEUE_MAX_SIZE = 200                  # 任务队列最大缓存（避免帧堆积）
 RUN_DURATION = 10                     # 测试运行时长（秒，可修改）
 
 # 视频保存参数（新增）
@@ -63,7 +63,7 @@ def process_frame(frame):
     
     # 2. BGR转RGB（cv2默认BGR，模型需要RGB）
     frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-    
+
     # 3. 格式转换：HWC -> CHW， dtype -> float32
     # frame_chw = frame_rgb.transpose(2, 0, 1)  # (H,W,C) → (C,H,W)
     frame_float = frame_rgb.astype(np.float32)
@@ -101,7 +101,7 @@ def postprocess_infer_result(infer_tensor):
     
     # 5. 格式转换：RGB → BGR（OpenCV默认BGR）
     frame_bgr = cv2.cvtColor(frame_resized.astype(np.uint8), cv2.COLOR_RGB2BGR)
-    
+    frame_bgr = sharpen_image(frame_bgr)
     return frame_bgr
 
 
@@ -215,6 +215,12 @@ def init_device(hef_path, device_id):
     print(f"设备 {device_id} 初始化完成 | 输入形状: {input_vstream_info.shape} | 输出形状: {output_vstream_info.shape}")
     return device_info
 
+def sharpen_image(image):
+    kernel = np.array([[0, -1, 0],
+                        [-1, 5, -1],
+                        [0, -1, 0]])
+    sharpened = cv2.filter2D(image, -1, kernel)
+    return sharpened
 
 # -------------------------- 推理函数（复用原逻辑） --------------------------
 def run_inference(device, input_batch):
@@ -233,6 +239,10 @@ def run_inference(device, input_batch):
     
     inference_time = time.time() - start_time
     output_tensor = infer_results[device["output_vstream_info"].name]
+    output_tensor = output_tensor.astype(np.float32)
+    k = 1.6213
+    b = -83.278
+    output_tensor = k * output_tensor + b
     return output_tensor, inference_time
 
 

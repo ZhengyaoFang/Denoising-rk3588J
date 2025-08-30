@@ -122,6 +122,10 @@ def run_inference(device, input_batch):
     
     inference_time = time.time() - start_time
     output_tensor = infer_results[device["output_vstream_info"].name]
+    output_tensor = output_tensor.astype(np.float32)
+    k = 1.6213
+    b = -83.278
+    output_tensor = k * output_tensor + b
     return output_tensor, inference_time
 
 # -------------------------- 工作进程（移除图像保存，专注推理） --------------------------
