@@ -19,9 +19,9 @@ from hailo_platform import (
 import cv2
 
 # -------------------------- 配置参数 --------------------------
-noisy_dir = '/home/firefly/Denoising/data/20250113'  # 输入噪声图像目录
-output_dir = '/home/firefly/Denoising-rk3588J/output/20250113_dncnn_4split'  # 并行处理输出目录
-hef_path = '/home/firefly/Denoising-rk3588J/models/dncnn_4split/dncnn_4split.hef'  # Hailo模型路径
+noisy_dir = '/home/firefly/Denoising-rk3588J/data/20250625'  # 输入噪声图像目录
+output_dir = '/home/firefly/Denoising-rk3588J/output/20250625_dncnn_4split_16pad'  # 并行处理输出目录
+hef_path = '/home/firefly/Denoising-rk3588J/models/dncnn_4split/dncnn_4split_16pad.hef'  # Hailo模型路径
 batch_size = 1  # 每个设备的批次大小
 input_shape = (3, 720, 960)  # (channel, height, width)
 NUM_DEVICES = 2  # 使用两个加速棒
@@ -163,13 +163,13 @@ def split_and_stack(batch_tensor):
     
     # 分割为4个子图
     # 左上角
-    sub1 = image[:sub_height, :sub_width, :]
+    sub1 = image[:sub_height+16, :sub_width+16, :]
     # 左下角
-    sub2 = image[sub_height:, :sub_width, :]
+    sub2 = image[sub_height-16:, :sub_width+16, :]
     # 右上角
-    sub3 = image[:sub_height, sub_width:, :]
+    sub3 = image[:sub_height+16, sub_width-16:, :]
     # 右下角
-    sub4 = image[sub_height:, sub_width:, :]
+    sub4 = image[sub_height-16:, sub_width-16:, :]
     
     # 堆叠成[4, 360, 480, 3]的数组
     stacked = np.stack([sub1, sub2, sub3, sub4], axis=0)
@@ -188,17 +188,17 @@ def stack_to_original(sub_images):
         形状为[1, 720, 960, 3]的numpy数组，原始图像
     """
     # 检查输入形状是否正确
-    if sub_images.shape != (4, 360, 480, 3):
-        raise ValueError("输入数组形状必须为[4, 360, 480, 3]")
+    if sub_images.shape != (4, 376, 496, 3):
+        raise ValueError(f"输入数组形状必须为[4, 360, 480, 3], 实际形状为{sub_images.shape}")
     
     # 提取4个子图
     sub1, sub2, sub3, sub4 = sub_images[0], sub_images[1], sub_images[2], sub_images[3]
     
     # 水平拼接第一行（上半部分）
-    top_row = np.concatenate([sub1, sub3], axis=1)
+    top_row = np.concatenate([sub1[:360,:480,:], sub3[:360,16:]], axis=1)
     
     # 水平拼接第二行（下半部分）
-    bottom_row = np.concatenate([sub2, sub4], axis=1)
+    bottom_row = np.concatenate([sub2[16:,:480,:], sub4[16:, 16:,:]], axis=1)
     
     # 垂直拼接两行，得到完整图像
     full_image = np.concatenate([top_row, bottom_row], axis=0)
