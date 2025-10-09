@@ -20,9 +20,9 @@ from hailo_platform import (
 
 # -------------------------- 核心配置参数 --------------------------
 # 摄像头参数
-CAMERA_DEVICE_PATH = "/dev/video21"  # 摄像头设备路径（根据实际情况修改）
+CAMERA_DEVICE_PATH = "/dev/video20"  # 摄像头设备路径（根据实际情况修改）
 TARGET_RESOLUTION = (960, 720)       # 目标分辨率 (width, height)
-TARGET_FPS = 60                      # 目标帧率
+TARGET_FPS = 20                      # 目标帧率
 VIDEO_FORMAT = cv2.VideoWriter_fourcc(*"MJPG")  # 摄像头格式（MJPG支持高帧率）
 
 # 推理参数

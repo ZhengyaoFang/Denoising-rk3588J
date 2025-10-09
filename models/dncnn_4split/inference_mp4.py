@@ -17,6 +17,7 @@ from hailo_platform import (
     VDevice,
 )
 
+
 # -------------------------- 核心配置参数 --------------------------
 # 输入视频参数
 INPUT_VIDEO_PATH = "/home/firefly/Denoising-rk3588J/data/20250703video/WIN_20250703_17_58_53_Pro.mp4"
@@ -340,6 +341,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    main()
     main()

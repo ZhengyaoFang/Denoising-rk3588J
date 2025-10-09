@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import multiprocessing as mp
 from tqdm import tqdm
+import queue
 from hailo_platform import (
     HEF,
     ConfigureParams,
@@ -19,17 +20,17 @@ from hailo_platform import (
 
 # -------------------------- 核心配置参数 --------------------------
 # 摄像头参数
-CAMERA_DEVICE_PATH = "/dev/video21"  # 摄像头设备路径（根据实际情况修改）
+CAMERA_DEVICE_PATH = "/dev/video20"  # 摄像头设备路径（根据实际情况修改）
 TARGET_RESOLUTION = (960, 720)       # 目标分辨率 (width, height)
-TARGET_FPS = 60                      # 目标帧率
+TARGET_FPS = 20                      # 目标帧率
 VIDEO_FORMAT = cv2.VideoWriter_fourcc(*"MJPG")  # 摄像头格式（MJPG支持高帧率）
 
 # 推理参数
-HEF_PATH = "/home/firefly/Denoising-rk3588J/models/dncnn_4split/dncnn_4split.hef"  # Hailo模型路径
+HEF_PATH = "/home/firefly/Denoising-rk3588J/models/dncnn_4split/dncnn_4split_16pad.hef"  # Hailo模型路径
 BATCH_SIZE = 1                        # 单设备批次大小（平衡实时性与效率）
 INPUT_SHAPE = (3, 720, 960)          # 模型输入形状 (channel, height, width)
 NUM_DEVICES = 2                       # 启用的Hailo加速棒数量
-QUEUE_MAX_SIZE = 50                   # 任务队列最大缓存（避免帧堆积）
+QUEUE_MAX_SIZE = 100                   # 任务队列最大缓存（避免帧堆积）
 RUN_DURATION = 10                     # 测试运行时长（秒，可修改）
 
 # -------------------------- 帧预处理（适配摄像头输入） --------------------------
@@ -37,23 +38,23 @@ def process_frame(frame):
     """
     处理摄像头BGR帧为模型输入格式（RGB+CHW+float32）
     :param frame: cv2读取的BGR帧（HWC格式）
-    :return: 预处理后的数据（CHW格式）、预处理耗时
+    :return: 预处理后的数据（CHW格式）、预处理耗时、调整后原始BGR帧（用于拼接）
     """
     start_time = time.time()
     
-    # 1. BGR转RGB（cv2默认BGR，模型需要RGB）
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    # 2. 调整分辨率（确保与目标一致，防止摄像头参数设置失效）
+    # 1. 调整分辨率（确保与目标一致，后续拼接时尺寸统一）
     frame_resized = cv2.resize(
-        frame_rgb, 
+        frame, 
         dsize=TARGET_RESOLUTION, 
         interpolation=cv2.INTER_LANCZOS4  # 高质量插值（与原代码PIL.LANCZOS对应）
     )
     
+    # 2. BGR转RGB（cv2默认BGR，模型需要RGB）
+    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+
     # 3. 格式转换：HWC -> CHW， dtype -> float32
-    frame_chw = frame_resized.transpose(2, 0, 1)  # (H,W,C) → (C,H,W)
-    frame_float = frame_chw.astype(np.float32)
+    # frame_chw = frame_rgb.transpose(2, 0, 1)  # (H,W,C) → (C,H,W)
+    frame_float = frame_rgb.astype(np.float32)
     
     process_time = time.time() - start_time
     return frame_float, process_time
@@ -136,8 +137,8 @@ def split_and_stack(batch_tensor):
         形状为[4, 360, 480, 3]的numpy数组
     """
     # 检查输入形状是否正确
-    if batch_tensor.shape != (1, 3, 720, 960):
-        raise ValueError(f"输入数组形状必须为[1, 3, 720, 960], 实际形状为{batch_tensor.shape}")
+    if batch_tensor.shape != (1, 720, 960, 3):
+        raise ValueError(f"输入数组形状必须为[1, 720, 960, 3], 实际输入数组形状为{batch_tensor.shape}")
     
     # 移除批次维度，得到[720, 960, 3]
     image = batch_tensor[0]
@@ -148,15 +149,15 @@ def split_and_stack(batch_tensor):
     
     # 分割为4个子图
     # 左上角
-    sub1 = image[:, :sub_height, :sub_width]
+    sub1 = image[:sub_height+16, :sub_width+16, :]
     # 左下角
-    sub2 = image[:, sub_height:, :sub_width]
+    sub2 = image[sub_height-16:, :sub_width+16, :]
     # 右上角
-    sub3 = image[:, :sub_height, sub_width:]
+    sub3 = image[:sub_height+16, sub_width-16:, :]
     # 右下角
-    sub4 = image[:, sub_height:, sub_width:]
+    sub4 = image[sub_height-16:, sub_width-16:, :]
     
-    # 堆叠成[4, 3, 360, 480]的数组
+    # 堆叠成[4, 360, 480, 3]的数组
     stacked = np.stack([sub1, sub2, sub3, sub4], axis=0)
     
     return stacked
@@ -173,17 +174,17 @@ def stack_to_original(sub_images):
         形状为[1, 720, 960, 3]的numpy数组，原始图像
     """
     # 检查输入形状是否正确
-    if sub_images.shape != (4, 360, 480, 3):
+    if sub_images.shape != (4, 376, 496, 3):
         raise ValueError(f"输入数组形状必须为[4, 360, 480, 3], 实际形状为{sub_images.shape}")
     
     # 提取4个子图
     sub1, sub2, sub3, sub4 = sub_images[0], sub_images[1], sub_images[2], sub_images[3]
     
     # 水平拼接第一行（上半部分）
-    top_row = np.concatenate([sub1, sub3], axis=1)
+    top_row = np.concatenate([sub1[:360,:480,:], sub3[:360,16:]], axis=1)
     
     # 水平拼接第二行（下半部分）
-    bottom_row = np.concatenate([sub2, sub4], axis=1)
+    bottom_row = np.concatenate([sub2[16:,:480,:], sub4[16:, 16:,:]], axis=1)
     
     # 垂直拼接两行，得到完整图像
     full_image = np.concatenate([top_row, bottom_row], axis=0)
@@ -206,14 +207,14 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
             task = task_queue.get()
             if task is None:  # 终止信号
                 break
-            
             batch_tensor, actual_batch_size, batch_index = task
             batch_tensor = split_and_stack(batch_tensor)
-            # 执行推理（忽略输出结果，仅统计时间）
+            # 执行推理，获取去噪后帧
             output_tensor, infer_time = run_inference(device, batch_tensor)
-            # 向主进程返回统计信息（批次索引、实际有效帧数、推理耗时）
+            # 拼回原图
             output_tensor = stack_to_original(output_tensor)
-            result_queue.put((batch_index, actual_batch_size, infer_time))
+            # 回传处理后帧（output_tensor为[1, 720, 960, 3]，float/uint8）
+            result_queue.put((batch_index, actual_batch_size, infer_time, output_tensor))
     
     except Exception as e:
         print(f"设备 {device_id} 工作进程出错: {str(e)}")
@@ -275,16 +276,20 @@ def main():
     total_infer_compute_time = 0   # 推理计算总耗时（所有设备累加）
     batch_index = 0                # 批次索引（用于匹配任务与结果）
     device_buffers = [[] for _ in range(NUM_DEVICES)]  # 各设备的帧缓存（积累批次）
+    # 新增：用于存储待显示帧的队列
+    display_queue = []
 
     # -------------------------- 4. 实时读取+推理循环 --------------------------
     print(f"\n开始读取摄像头帧（按 'q' 提前退出）...")
-    while (time.time() - read_start_time) < RUN_DURATION:
+    # 新增：主循环同时处理摄像头读取和推理结果显示
+    # while (time.time() - read_start_time) < RUN_DURATION:
+    while True:
         # 读取摄像头帧
         ret, frame = cap.read()
         if not ret:
             print("⚠️  无法读取摄像头帧，退出循环")
             break
-        
+
         read_total_frames += 1
         current_time = time.time()
 
@@ -297,37 +302,49 @@ def main():
 
         # 当缓存达到批次大小时，发送推理任务
         if len(device_buffers[target_device_id]) >= BATCH_SIZE:
-            # 提取批次帧并补零（不足批次大小时）
             batch_frames = device_buffers[target_device_id][:BATCH_SIZE]
             actual_batch_size = len(batch_frames)
             if actual_batch_size < BATCH_SIZE:
                 pad_size = BATCH_SIZE - actual_batch_size
                 batch_frames += [np.zeros_like(batch_frames[0]) for _ in range(pad_size)]
-            
-            # 转换为批次张量（shape: [batch_size, C, H, W]）
             batch_tensor = np.stack(batch_frames, axis=0)
-
-            # 发送任务到队列（避免队列满导致阻塞）
             try:
                 task_queues[target_device_id].put(
                     (batch_tensor, actual_batch_size, batch_index),
-                    block=False  # 非阻塞模式，队列满时丢弃
+                    block=False
                 )
                 batch_index += 1
-                # 记录推理开始时间（第一个任务发送时）
                 if infer_start_time is None:
                     infer_start_time = current_time
                 print(f"📤 设备 {target_device_id} 发送批次 {batch_index-1}（有效帧: {actual_batch_size}）", end="\r")
             except mp.Queue.Full:
                 print(f"⚠️  设备 {target_device_id} 任务队列已满，丢弃当前批次", end="\r")
-
-            # 清空已发送的缓存
+                
             device_buffers[target_device_id] = device_buffers[target_device_id][BATCH_SIZE:]
 
-        # 按 'q' 键提前退出
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            print("\n🛑 用户按下 'q' 键，提前退出")
+        # 新增：实时获取推理结果并展示
+        # 尝试非阻塞获取结果队列（避免阻塞主循环）
+        try:
+            while True:
+                batch_idx, actual_frames, infer_time, output_tensor = result_queue.get(block=False)
+                infer_total_frames += actual_frames
+                total_infer_compute_time += infer_time
+                # output_tensor: [1, 720, 960, 3]，如float32/uint8，需转为uint8和BGR
+                frame_to_show = output_tensor[0]
+                if frame_to_show.dtype != np.uint8:
+                    frame_to_show = np.clip(frame_to_show, 0, 255).astype(np.uint8)
+                # RGB->BGR
+                #frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_RGB2BGR)
+                cv2.imshow("Denoised Stream", frame_to_show)
+                cv2.imwrite("video_frame_test.jpg", frame_to_show)
+                # 按 'q' 键提前退出
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    print("\n🛑 用户按下 'q' 键，提前退出")
+                    raise KeyboardInterrupt
+        except KeyboardInterrupt:
             break
+        except Exception:
+            pass  # 队列为空时继续主循环
 
     # -------------------------- 5. 处理剩余帧（缓存中未发送的帧） --------------------------
     print(f"\n\n处理缓存中剩余的帧...")
@@ -354,74 +371,15 @@ def main():
     # 向所有工作进程发送终止信号
     for q in task_queues:
         q.put(None)
-    
-    # 收集推理结果（进度条显示）
-    print(f"\n收集推理结果...")
-    processed_batches = 0
-    progress_bar = tqdm(total=batch_index, desc="推理进度")
-    while processed_batches < batch_index:
-        try:
-            # 从结果队列获取数据（阻塞等待）
-            batch_idx, actual_frames, infer_time = result_queue.get(block=True, timeout=30)
-            infer_total_frames += actual_frames
-            total_infer_compute_time += infer_time
-            processed_batches += 1
-            progress_bar.update(1)
-        except mp.Queue.Empty:
-            print(f"⚠️  结果队列超时，未收集到所有批次结果（已处理 {processed_batches}/{batch_index}）")
-            break
-    progress_bar.close()
+
 
     # -------------------------- 7. 释放资源 --------------------------
     cap.release()
     cv2.destroyAllWindows()
     for p in processes:
         p.join(timeout=10)
-        print(f"🔚 设备进程 {p.pid} 退出状态: {'正常' if p.exitcode == 0 else '异常'}")
+        print(f"🔚 设备进程 {p.pid} ")
 
-    # -------------------------- 8. 计算并输出FPS统计 --------------------------
-    print("\n" + "="*60)
-    print("📊 实时推理FPS统计结果")
-    print("="*60)
-
-    # 1. 摄像头读取性能
-    read_total_time = time.time() - read_start_time
-    read_fps = read_total_frames / read_total_time if read_total_time > 1e-3 else 0.0
-    print(f"1. 摄像头读取性能")
-    print(f"   - 总读取帧数: {read_total_frames} 帧")
-    print(f"   - 读取总时间: {read_total_time:.2f} 秒")
-    print(f"   - 实际读取FPS: {read_fps:.2f} fps")
-
-    # 2. 推理性能（仅统计有有效推理的情况）
-    if infer_start_time is not None and infer_total_frames > 0:
-        infer_total_wall_time = time.time() - infer_start_time  # 推理阶段墙钟时间
-        infer_fps = infer_total_frames / infer_total_wall_time  # 实际推理FPS
-        device_utilization = (total_infer_compute_time / (NUM_DEVICES * infer_total_wall_time)) * 100  # 设备利用率
-        parallel_speedup = (total_infer_compute_time / NUM_DEVICES) / infer_total_wall_time  # 并行加速比
-
-        print(f"\n2. 推理性能（{NUM_DEVICES} 设备并行）")
-        print(f"   - 总推理帧数: {infer_total_frames} 帧")
-        print(f"   - 推理墙钟时间: {infer_total_wall_time:.2f} 秒")
-        print(f"   - 推理计算总耗时（累加）: {total_infer_compute_time:.2f} 秒")
-        print(f"   - 实际推理FPS: {infer_fps:.2f} fps")
-        print(f"   - 设备平均利用率: {device_utilization:.1f}%")
-        print(f"   - 并行加速比: {parallel_speedup:.2f}x")
-    else:
-        print(f"\n2. 推理性能")
-        print(f"   - 未完成有效推理（可能设备初始化失败或无帧输入）")
-
-    # 3. 整体性能瓶颈分析
-    print(f"\n3. 瓶颈分析")
-    if read_fps < TARGET_FPS * 0.9:
-        print(f"   ⚠️  摄像头读取FPS（{read_fps:.2f}）低于目标（{TARGET_FPS}），读取为瓶颈")
-    elif infer_start_time is not None and infer_fps < read_fps * 0.9:
-        print(f"   ⚠️  推理FPS（{infer_fps:.2f}）低于读取FPS（{read_fps:.2f}），推理为瓶颈")
-    else:
-        print(f"   ✅ 性能匹配：推理FPS（{infer_fps:.2f}）≥ 读取FPS（{read_fps:.2f}），无明显瓶颈")
-
-    total_time = time.time() - total_start_time
-    print(f"\n4. 整体耗时: {total_time:.2f} 秒")
-    print("="*60)
 
 if __name__ == "__main__":
     # Windows系统需强制使用spawn启动方式（跨平台兼容）
