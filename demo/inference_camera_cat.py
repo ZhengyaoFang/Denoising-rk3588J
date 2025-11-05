@@ -247,7 +247,7 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
                     infer_tensors = infer_results[device["output_vstream_info"].name]
                     infer_tensors = stack_to_original(infer_tensors)
 
-                    result_queue.put((batch_index, actual_batch_size, infer_time, ori_tensor, infer_tensors))
+                    result_queue.put((batch_index, actual_batch_size, infer_time, infer_tensors))
 
                 except Exception as e:
                     print(f"[Worker {device_id}] inference error: {e}")
@@ -348,15 +348,11 @@ def main():
             except Exception as e:
                 # 队列满时尝试弹出最旧任务以腾空间（丢帧策略）
                 try:
-                    _ = task_queues[target_dev].get_nowait()  # 丢弃最旧
+                    batch_index,_,_ = task_queues[target_dev].get_nowait()  # 丢弃最旧
+                    if batch_index in result_cache:
+                        del result_cache[batch_index]
+                    # 现在再尝试放入新任务
                     task_queues[target_dev].put_nowait((batch_index, actual_batch_size, batch_tensor))
-                    # 同时要丢弃 result_cache 中对应最旧的索引（无法精确知道被丢弃的 batch_index — 但我们尽量保持缓存大小）
-                    # 为简单处理：若 result_cache 太大则修剪最旧项
-                    if len(result_cache) > QUEUE_MAX_SIZE * 4:
-                        # 按 insertion order 剪掉最旧若干
-                        keys = list(result_cache.keys())
-                        for k in keys[:4]:
-                            result_cache.pop(k, None)
                     result_cache[batch_index] = frame_original
                     batch_index += 1
                 except Exception:
@@ -371,7 +367,7 @@ def main():
 
             while True:
                 try:
-                    batch_idx_res, actual_frames, infer_time, ori_tensors, infer_tensors = result_queue.get_nowait()
+                    batch_idx_res, actual_frames, infer_time, infer_tensors = result_queue.get_nowait()
                     if batch_idx_res < show_idx:
                         continue
 
@@ -388,9 +384,8 @@ def main():
                         continue
 
 
-                    latest_original_frame = ori_tensors[0]
+                    latest_original_frame = result_cache.get(batch_idx_res, None)
                     latest_infer_frame = infer_frame_bgr
-                    print(latest_original_frame.shape, latest_infer_frame.shape)
                     try:
                         if latest_original_frame is not None:
                             # 确保尺寸一致
@@ -399,12 +394,10 @@ def main():
                             if (h1, w1) != (h2, w2):
                                 latest_infer_frame = cv2.resize(latest_infer_frame, (w1, h1))
 
+
                             # 左右拼接 (原图 | 推理图)
                             combined = np.concatenate((latest_original_frame, latest_infer_frame), axis=1)
-
-                            # 可选：转换为 BGR 以防模型输出为 RGB
-                            # combined = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
-
+                            #cv2.imshow(WINDOW_NAME, combined)
                             cv2.imshow(WINDOW_NAME, combined)
                         else:
                             # 仅显示推理帧

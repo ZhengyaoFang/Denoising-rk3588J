@@ -38,7 +38,7 @@ QUEUE_MAX_SIZE = 1
 RUN_DURATION = None
 
 # 显示窗口名字
-WINDOW_NAME = "Live Denoise (Original | Inferred)"
+WINDOW_NAME = "Live Denoise (Inferred)"
 
 def process_frame(frame):
     """
