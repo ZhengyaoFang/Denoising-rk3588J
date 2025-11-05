@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+该版本延迟较小，但帧乱序显示
+"""
 import os
 import time
 import cv2
@@ -231,10 +234,10 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
                 task = task_queue.get()
                 if task is None:
                     break  # None 表示退出
-                batch_index, actual_batch_size, batch_tensor = task
+                batch_index, actual_batch_size, ori_tensor = task
 
                 try:
-                    batch_tensor = split_and_stack(batch_tensor)
+                    batch_tensor = split_and_stack(ori_tensor)
                     input_data = {device["input_vstream_info"].name: batch_tensor}
 
                     start_time = time.time()
@@ -244,7 +247,7 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
                     infer_tensors = infer_results[device["output_vstream_info"].name]
                     infer_tensors = stack_to_original(infer_tensors)
 
-                    result_queue.put((batch_index, actual_batch_size, infer_time, infer_tensors))
+                    result_queue.put((batch_index, actual_batch_size, infer_time, ori_tensor, infer_tensors))
 
                 except Exception as e:
                     print(f"[Worker {device_id}] inference error: {e}")
@@ -368,7 +371,7 @@ def main():
 
             while True:
                 try:
-                    batch_idx_res, actual_frames, infer_time, infer_tensors = result_queue.get_nowait()
+                    batch_idx_res, actual_frames, infer_time, ori_tensors, infer_tensors = result_queue.get_nowait()
                     if batch_idx_res < show_idx:
                         continue
 
@@ -384,17 +387,31 @@ def main():
                         print(1)
                         continue
 
-                    orig = result_cache.pop(batch_idx_res, None)
-                    if orig is None:
-                        latest_infer_frame = infer_frame_bgr
-                        latest_original_frame = None
-                    else:
-                        latest_original_frame = orig
-                        latest_infer_frame = infer_frame_bgr
-                    
-                    # 转换颜色空间并显示
-                    #latest_infer_frame = cv2.cvtColor(latest_infer_frame, cv2.COLOR_BGR2RGB)
-                    cv2.imshow(WINDOW_NAME, latest_infer_frame)
+
+                    latest_original_frame = ori_tensors
+                    latest_infer_frame = infer_frame_bgr
+                    print(latest_original_frame.shape, latest_infer_frame.shape)
+                    try:
+                        if latest_original_frame is not None:
+                            # 确保尺寸一致
+                            h1, w1 = latest_original_frame.shape[:2]
+                            h2, w2 = latest_infer_frame.shape[:2]
+                            if (h1, w1) != (h2, w2):
+                                latest_infer_frame = cv2.resize(latest_infer_frame, (w1, h1))
+
+                            # 左右拼接 (原图 | 推理图)
+                            combined = np.concatenate((latest_original_frame, latest_infer_frame), axis=1)
+
+                            # 可选：转换为 BGR 以防模型输出为 RGB
+                            # combined = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
+
+                            cv2.imshow(WINDOW_NAME, combined)
+                        else:
+                            # 仅显示推理帧
+                            cv2.imshow(WINDOW_NAME, latest_infer_frame)
+
+                    except Exception as e:
+                        print(f"[Display warning] failed to display combined frame: {e}")
 
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         print("User requested exit.")

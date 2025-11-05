@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+该版本延迟较小，但帧乱序显示
+"""
 import os
 import time
 import cv2
-
-cv2.setNumThreads(2)
-cv2.ocl.setUseOpenCL(True)
-
 import numpy as np
 import multiprocessing as mp
 import queue
@@ -23,17 +22,22 @@ from hailo_platform import (
     OutputVStreamParams,
     VDevice,
 )
-
-
+# --- 请把你之前定义的 process_frame, postprocess_infer_result,
+#     split_and_stack, stack_to_original, stitch_frames, init_device, run_inference
+#     worker_process 等函数直接复用到这个文件中（下文代码假设这些函数已存在） ---
+#
+# 这里我会重新定义 worker_process 以更好支持低延迟行为（尽量快速推理并返回）
+# 并给出 main() 的实时显示实现。
+#
 # ---------------- 配置 ----------------
 CAMERA_DEVICE_PATH = "/dev/video20"
 TARGET_RESOLUTION = (960, 720)
 TARGET_FPS_DISPLAY = 20           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
-HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef"
+HEF_PATH = "/home/firefly/Denoising-rk3588J/models/dncnn_4split/dncnn_4split_16pad.hef"
 NUM_DEVICES = 2
 BATCH_SIZE = 1
 # 将队列设小以降低延迟（优先丢弃旧帧），可根据设备吞吐微调为 2-6
-QUEUE_MAX_SIZE = 1
+QUEUE_MAX_SIZE = 4
 # 主循环最长运行（秒），设为 None 则无限运行直到按 q 退出
 RUN_DURATION = None
 
@@ -52,12 +56,11 @@ def process_frame(frame):
     frame_resized = cv2.resize(
         frame, 
         dsize=TARGET_RESOLUTION, 
-        interpolation=cv2.INTER_AREA  # 高质量插值（与原代码PIL.LANCZOS对应）
+        interpolation=cv2.INTER_LANCZOS4  # 高质量插值（与原代码PIL.LANCZOS对应）
     )
     
     # 2. BGR转RGB（cv2默认BGR，模型需要RGB）
-    #frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-    frame_rgb = frame_resized
+    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
 
     # 3. 格式转换：HWC -> CHW， dtype -> float32
     # frame_chw = frame_rgb.transpose(2, 0, 1)  # (H,W,C) → (C,H,W)
@@ -115,31 +118,21 @@ def init_device(hef_path, device_id):
 
 # -------------------------- 推理函数（复用原逻辑） --------------------------
 def run_inference(device, input_batch):
-    """
-    在单个设备上运行推理，返回推理结果与耗时
-    device: 包含 network_group、vstream 参数的字典
-    input_batch: numpy 数组或 tensor，形状 [N, H, W, C]
-    """
+    """在单个设备上运行推理，返回推理结果与耗时"""
     network_group = device["network_group"]
     input_vstreams_params = device["input_vstreams_params"]
     output_vstreams_params = device["output_vstreams_params"]
     network_group_params = device["network_group_params"]
     input_vstream_info = device["input_vstream_info"]
-    output_vstream_info = device["output_vstream_info"]
 
     start_time = time.time()
-
-    # 与 worker_process 统一结构：activate 与 InferVStreams 同层
-    with network_group.activate(network_group_params), \
-         InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
-
-        # 准备输入字典
-        input_data = {input_vstream_info.name: input_batch}
-        # 执行推理
-        infer_results = infer_pipeline.infer(input_data)
-
+    with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
+        with network_group.activate(network_group_params):
+            input_data = {input_vstream_info.name: input_batch}
+            infer_results = infer_pipeline.infer(input_data)
+    
     inference_time = time.time() - start_time
-    output_tensor = infer_results[output_vstream_info.name]
+    output_tensor = infer_results[device["output_vstream_info"].name]
 
     return output_tensor, inference_time
 
@@ -212,48 +205,32 @@ def stack_to_original(sub_images):
 # ---------------- worker_process (更简单的版本) ----------------
 def worker_process(device_id, task_queue, result_queue, hef_path):
     """
-    每个设备的工作进程：持续从队列取任务并推理，然后将结果放入结果队列。
+    每个设备的工作进程：从 task_queue 尽快取出任务并推理，然后把结果放到 result_queue。
     任务格式: (batch_index, actual_batch_size, batch_tensor)
     返回格式: (batch_index, actual_batch_size, infer_time, infer_tensors)
     """
     try:
-        # 初始化设备
         device = init_device(hef_path, device_id)
-        ng = device["network_group"]
-        ng_params = device["network_group_params"]
-        input_vp = device["input_vstreams_params"]
-        output_vp = device["output_vstreams_params"]
         print(f"[Worker {device_id}] started, PID={os.getpid()}")
-
-        # 将 InferVStreams 和 activate 保持一次性上下文管理（效率更高）
-        with ng.activate(ng_params), InferVStreams(ng, input_vp, output_vp) as pipeline:
-            while True:
-                task = task_queue.get()
-                if task is None:
-                    break  # None 表示退出
-                batch_index, actual_batch_size, batch_tensor = task
-
-                try:
-                    batch_tensor = split_and_stack(batch_tensor)
-                    input_data = {device["input_vstream_info"].name: batch_tensor}
-
-                    start_time = time.time()
-                    infer_results = pipeline.infer(input_data)
-                    infer_time = time.time() - start_time
-
-                    infer_tensors = infer_results[device["output_vstream_info"].name]
-                    infer_tensors = stack_to_original(infer_tensors)
-
-                    result_queue.put((batch_index, actual_batch_size, infer_time, infer_tensors))
-
-                except Exception as e:
-                    print(f"[Worker {device_id}] inference error: {e}")
-
+        while True:
+            task = task_queue.get()  # blocking; keep device busy
+            if task is None:
+                break
+            batch_index, actual_batch_size, batch_tensor = task
+            try:
+                batch_tensor = split_and_stack(batch_tensor)
+                # 预期 batch_tensor 为形如 [N, H, W, C] (uint8/float32) -> run_inference 内处理
+                infer_tensors, infer_time = run_inference(device, batch_tensor)
+                # 如果 run_inference 返回的是 [N, ...]，需要把形状恢复到原始拼接方式
+                # 保持与你原来一致：stack_to_original(infer_tensors) 等由 run_inference 的输出决定
+                # 这里直接返回 infer_tensors（主进程做后处理/拼接）
+                infer_tensors = stack_to_original(infer_tensors)
+                result_queue.put((batch_index, actual_batch_size, infer_time, infer_tensors))
+            except Exception as e:
+                print(f"[Worker {device_id}] inference error: {e}")
     except Exception as e:
         print(f"[Worker {device_id}] init error: {e}")
-
     finally:
-        # 安全释放设备
         if "device" in locals():
             try:
                 device["target"].release()
@@ -286,7 +263,7 @@ def main():
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, TARGET_RESOLUTION[0])
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_RESOLUTION[1])
-    cap.set(cv2.CAP_PROP_FPS, 60)  # 摄像头最低30fps，尽量读满
+    cap.set(cv2.CAP_PROP_FPS, 30)  # 摄像头最低30fps，尽量读满
 
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -307,10 +284,6 @@ def main():
 
     print("按 q 键退出。")
     show_idx = 0
-    # 在循环外初始化帧率统计相关变量
-    frame_count = 0  # 统计显示的总帧数
-    start_time = time.time()  # 起始时间
-    last_print_time = start_time  # 上次打印帧率的时间
     try:
         while True:
             if RUN_DURATION is not None and (time.time() - read_start) > RUN_DURATION:
@@ -364,8 +337,6 @@ def main():
             # 4) 处理 result_queue（尽可能清空，保留最新结果显示）
             # 我们会把 result_queue 中的所有结果读取出来，用最后一个覆盖 latest_infer_frame
             
-            
-
             while True:
                 try:
                     batch_idx_res, actual_frames, infer_time, infer_tensors = result_queue.get_nowait()
@@ -373,17 +344,24 @@ def main():
                         continue
 
                     show_idx = batch_idx_res
+                    # 注意：infer_tensors 可能是压缩/子图形式，需要经过 stack_to_original 或 postprocess
                     try:
+                        # 如果需要把 infer_tensors 转回原始形状：stack_to_original(infer_tensors)
+                        # 我沿用你原来的 stack_to_original()：若输出为 [4,376,496,3] 则该函数会报错，视你 run_inference 返回格式而定
                         infer_tensors_full = infer_tensors
                     except Exception:
                         infer_tensors_full = infer_tensors
 
+                    # 这里只取第0张（因为我们用 batch_size=1）
                     try:
                         infer_frame_bgr = infer_tensors_full[0]
+                        
                     except Exception:
+                        # 若 postprocess 失败，跳过
                         print(1)
                         continue
 
+                    # 如果缓存中存在对应原始帧，则一起拼接；否则只显示推理帧
                     orig = result_cache.pop(batch_idx_res, None)
                     if orig is None:
                         latest_infer_frame = infer_frame_bgr
@@ -391,15 +369,13 @@ def main():
                     else:
                         latest_original_frame = orig
                         latest_infer_frame = infer_frame_bgr
-                    
-                    # 转换颜色空间并显示
-                    #latest_infer_frame = cv2.cvtColor(latest_infer_frame, cv2.COLOR_BGR2RGB)
+                    latest_infer_frame = cv2.cvtColor(latest_infer_frame, cv2.COLOR_BGR2RGB)
                     cv2.imshow(WINDOW_NAME, latest_infer_frame)
-
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         print("User requested exit.")
                         raise KeyboardInterrupt
 
+                    # 继续读取队列，最后一个结果会成为最新显示
                 except queue.Empty:
                     break
 

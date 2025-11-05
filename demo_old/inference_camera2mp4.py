@@ -27,7 +27,7 @@ TARGET_FPS = 20                      # 目标帧率
 VIDEO_FORMAT = cv2.VideoWriter_fourcc(*"MJPG")  # 摄像头格式（MJPG支持高帧率）
 
 # 推理参数
-HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef"  # Hailo模型路径
+HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_4split_16pad.hef"  # Hailo模型路径
 BATCH_SIZE = 1                        # 单设备批次大小（平衡实时性与效率）
 INPUT_SHAPE = (3, 720, 960)          # 模型输入形状 (channel, height, width)
 NUM_DEVICES = 2                       # 启用的Hailo加速棒数量

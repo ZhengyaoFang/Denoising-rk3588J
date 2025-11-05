@@ -24,7 +24,7 @@ import argparse
 TARGET_RESOLUTION = (960, 720)       # 需与模型输入匹配
 
 # 推理参数（单设备串行，无需多设备配置）
-HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef"
+HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_4split_16pad.hef"
 DEVICE_ID = 0                        # 使用单个Hailo设备（根据实际设备ID调整）
 
 # 输出视频参数
