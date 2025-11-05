@@ -388,14 +388,14 @@ def main():
                         continue
 
 
-                    latest_original_frame = ori_tensors
+                    latest_original_frame = ori_tensors[0]
                     latest_infer_frame = infer_frame_bgr
                     print(latest_original_frame.shape, latest_infer_frame.shape)
                     try:
                         if latest_original_frame is not None:
                             # 确保尺寸一致
                             h1, w1 = latest_original_frame.shape[:2]
-                            h2, w2 = latest_infer_frame.shape[:2]
+                            h2, w2 = latest_infer_frame.shape[:2] 
                             if (h1, w1) != (h2, w2):
                                 latest_infer_frame = cv2.resize(latest_infer_frame, (w1, h1))
 
