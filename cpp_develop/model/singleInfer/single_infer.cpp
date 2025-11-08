@@ -89,10 +89,16 @@ cv::Mat infer_single_tile(const cv::Mat &tile, const std::shared_ptr<hailort::Co
 
 
 // =====================================================================
-//                封装接口函数：输入图像 + 设备号 → 输出图像
+//     封装接口函数：输入图像 + 设备号 + [可选输出宽高] → 输出图像
 // =====================================================================
-cv::Mat run_inference_on_device(const cv::Mat &input_bgr, int chosen_index)
+cv::Mat run_inference_on_device(
+    const cv::Mat &input_bgr,
+    int chosen_index,
+    int output_width = 960,      // ✅ 默认输出宽度
+    int output_height = 720      // ✅ 默认输出高度
+)
 {
+    // ===== 1. 扫描并选择设备 =====
     auto devices_result = hailort::Device::scan();
     if (!devices_result)
         throw std::runtime_error("Device scan failed");
@@ -109,12 +115,13 @@ cv::Mat run_inference_on_device(const cv::Mat &input_bgr, int chosen_index)
     if (!vdevice)
         throw std::runtime_error("Failed to create VDevice for chosen device");
 
-    // ===== 图像预处理 =====
+    // ===== 2. 图像预处理（缩放到模型输入尺寸）=====
+    const cv::Size model_input_size(960, 720);  // 模型固定输入分辨率
     cv::Mat input;
-    cv::resize(input_bgr, input, TARGET_RESOLUTION);
+    cv::resize(input_bgr, input, model_input_size);
     input.convertTo(input, CV_32FC3);
 
-    // ===== 加载 HEF 并配置网络 =====
+    // ===== 3. 加载 HEF 模型并配置网络 =====
     auto hef = Hef::create(HEF_PATH);
     if (!hef)
         throw std::runtime_error("Failed to load HEF file");
@@ -123,15 +130,24 @@ cv::Mat run_inference_on_device(const cv::Mat &input_bgr, int chosen_index)
     auto network_groups = vdevice.value()->configure(hef.value(), configure_params.value());
     auto network_group = network_groups->at(0);
 
-    // ===== 分块推理 + 拼接 =====
+    // ===== 4. 分块推理 + 拼接 =====
     auto tiles = split_into_four(input);
     std::vector<cv::Mat> outputs;
     for (auto &t : tiles)
         outputs.push_back(infer_single_tile(t, network_group));
 
     cv::Mat merged = reconstruct_from_four(outputs);
+
+    // ===== 5. 输出后处理：resize 到指定宽高 =====
+    if (merged.cols != output_width || merged.rows != output_height) {
+        cv::Mat resized;
+        cv::resize(merged, resized, cv::Size(output_width, output_height), 0, 0, cv::INTER_AREA);
+        return resized;
+    }
+
     return merged;
 }
+
 
 
 // =====================================================================
@@ -149,8 +165,10 @@ int main()
     }
 
     int device_index = 0;  // 这里手动选择设备编号
+    int width=100;
+    int height=100;
     try {
-        cv::Mat result = run_inference_on_device(input, device_index);
+        cv::Mat result = run_inference_on_device(input, device_index, width, height);
         cv::imwrite(OUTPUT_IMAGE, result);
         std::cout << "✅ Output saved to: " << OUTPUT_IMAGE << std::endl;
     }
