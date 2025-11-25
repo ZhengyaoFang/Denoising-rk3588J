@@ -58,7 +58,7 @@ fi
 echo "🎬 开始推理..."
 ./${PROJECT_NAME}
 if [ $? -eq 0 ]; then
-    echo "✅ 推理完成，输出图像位于: $OUTPUT_IMAGE"
+    echo "✅ 推理完成"
 else
     echo "❌ 推理运行失败"
     exit 1

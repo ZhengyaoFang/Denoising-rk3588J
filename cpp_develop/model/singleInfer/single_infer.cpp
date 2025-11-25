@@ -165,8 +165,8 @@ int main()
     }
 
     int device_index = 0;  // 这里手动选择设备编号
-    int width=100;
-    int height=100;
+    int width=960;
+    int height=720;
     try {
         cv::Mat result = run_inference_on_device(input, device_index, width, height);
         cv::imwrite(OUTPUT_IMAGE, result);
