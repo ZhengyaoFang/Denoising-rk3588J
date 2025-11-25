@@ -12,6 +12,7 @@ cv2.ocl.setUseOpenCL(True)
 
 import numpy as np
 import multiprocessing as mp
+from multiprocessing import Manager
 import queue
 from datetime import datetime
 from hailo_platform import (
@@ -214,11 +215,7 @@ def stack_to_original(sub_images):
 
 # ---------------- worker_process (更简单的版本) ----------------
 def worker_process(device_id, task_queue, result_queue, hef_path):
-    """
-    每个设备的工作进程：持续从队列取任务并推理，然后将结果放入结果队列。
-    任务格式: (batch_index, actual_batch_size, batch_tensor)
-    返回格式: (batch_index, actual_batch_size, infer_time, infer_tensors)
-    """
+    """每个设备的工作进程：持续从队列取任务并推理，然后将结果放入结果队列。"""
     try:
         # 初始化设备
         device = init_device(hef_path, device_id)
@@ -266,9 +263,11 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
 
 # ---------------- 主流程 (低延迟显示) ----------------
 def main():
+
     mp.set_start_method("spawn", force=True)
 
     print("启动实时显示模式 (低延迟, 丢帧优先)")
+
     # ---------------- 启动 worker 进程 ----------------
     task_queues = [mp.Queue(maxsize=QUEUE_MAX_SIZE) for _ in range(NUM_DEVICES)]
     result_queue = mp.Queue(maxsize=QUEUE_MAX_SIZE * NUM_DEVICES * 2)
@@ -285,23 +284,20 @@ def main():
     if not cap.isOpened():
         raise RuntimeError(f"无法打开摄像头: {CAMERA_DEVICE_PATH}")
 
-    # 设置摄像头期望参数（并不保证一定生效）
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, TARGET_RESOLUTION[0])
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_RESOLUTION[1])
-    cap.set(cv2.CAP_PROP_FPS, 60)  # 摄像头最低30fps，尽量读满
+    cap.set(cv2.CAP_PROP_FPS, 60)
 
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     actual_cam_fps = cap.get(cv2.CAP_PROP_FPS)
     print(f"Camera opened: {actual_w}x{actual_h} @ {actual_cam_fps:.1f}fps")
 
-    # ---------------- 状态变量 ----------------
     batch_index = 0
-    # result_cache 只保存原始 frames 用于后续拼接 (key=batch_index)
     result_cache = {}
-    latest_infer_frame = None       # 最新推理帧（用于显示）
-    latest_original_frame = None    # 对应的原始帧（用于拼接显示）
+    latest_infer_frame = None
+    latest_original_frame = None
     last_display_time = time.time()
     ema_fps = None
     alpha = 0.1  # EMA smoothing for fps
@@ -310,60 +306,43 @@ def main():
 
     print("按 q 键退出。")
     show_idx = 0
-    # 在循环外初始化帧率统计相关变量
-    frame_count = 0  # 统计显示的总帧数
-    start_time = time.time()  # 起始时间
-    last_print_time = start_time  # 上次打印帧率的时间
+    frame_count = 0
+    start_time = time.time()
+    last_print_time = start_time
     try:
         while True:
             if RUN_DURATION is not None and (time.time() - read_start) > RUN_DURATION:
                 print("达到运行时长，退出")
                 break
 
-            # 1) 读取摄像头帧 (non-blocking best effort)
+            # 1) 读取摄像头帧
             ret, frame = cap.read()
             if not ret:
-                # 读取失败时短暂sleep避免忙等
                 time.sleep(0.005)
                 continue
 
             # 预处理（快速）
             frame_processed, _, frame_original = process_frame(frame)
 
-            # 2) 将帧打包为 batch（此处 BATCH_SIZE=1，大多数情况立即发送）
-            batch_tensor = np.expand_dims(frame_processed, axis=0)  # [1, H, W, C] 或与模型输入匹配
+            batch_tensor = np.expand_dims(frame_processed, axis=0)
             actual_batch_size = 1
 
-            # round-robin 选择设备
             target_dev = batch_index % NUM_DEVICES
 
-            # 3) 尝试把任务放入对应设备队列；若满 -> 丢弃队列中最旧的任务以保证最新任务入队（优先实时性）
             try:
                 task_queues[target_dev].put_nowait((batch_index, actual_batch_size, batch_tensor))
-                # 缓存原始帧以便后续拼接显示（只保存必要信息）
                 result_cache[batch_index] = frame_original
-                # debug
-                # print(f"sent batch {batch_index} to dev {target_dev}")
                 batch_index += 1
-            except Exception as e:
-                # 队列满时尝试弹出最旧任务以腾空间（丢帧策略）
+            except Exception:
                 try:
-                    batch_index,_,_ = task_queues[target_dev].get_nowait()  # 丢弃最旧
+                    batch_index, _, _ = task_queues[target_dev].get_nowait()
                     if batch_index in result_cache:
                         del result_cache[batch_index]
-                    # 现在再尝试放入新任务
                     task_queues[target_dev].put_nowait((batch_index, actual_batch_size, batch_tensor))
                     result_cache[batch_index] = frame_original
                     batch_index += 1
                 except Exception:
-                    # 如果仍失败，放弃当前帧（立即丢帧以保证低延迟）
-                    # print("drop frame due to full queue")
                     pass
-
-            # 4) 处理 result_queue（尽可能清空，保留最新结果显示）
-            # 我们会把 result_queue 中的所有结果读取出来，用最后一个覆盖 latest_infer_frame
-            
-            
 
             while True:
                 try:
@@ -383,24 +362,18 @@ def main():
                         print(1)
                         continue
 
-
-                    latest_original_frame = result_cache.get(batch_idx_res, None)
+                    latest_original_frame = result_cache.pop(batch_idx_res, None)
                     latest_infer_frame = infer_frame_bgr
                     try:
                         if latest_original_frame is not None:
-                            # 确保尺寸一致
                             h1, w1 = latest_original_frame.shape[:2]
-                            h2, w2 = latest_infer_frame.shape[:2] 
+                            h2, w2 = latest_infer_frame.shape[:2]
                             if (h1, w1) != (h2, w2):
                                 latest_infer_frame = cv2.resize(latest_infer_frame, (w1, h1))
 
-
-                            # 左右拼接 (原图 | 推理图)
                             combined = np.concatenate((latest_original_frame, latest_infer_frame), axis=1)
-                            #cv2.imshow(WINDOW_NAME, combined)
                             cv2.imshow(WINDOW_NAME, combined)
                         else:
-                            # 仅显示推理帧
                             cv2.imshow(WINDOW_NAME, latest_infer_frame)
 
                     except Exception as e:
@@ -413,11 +386,9 @@ def main():
                 except queue.Empty:
                     break
 
-            time.sleep(0.001)
-
     except KeyboardInterrupt:
         print("KeyboardInterrupt -> exiting main loop")
-    finally:
+    finally:·
         # 结束：向 worker 发送终止信号
         for q in task_queues:
             try:
@@ -429,6 +400,7 @@ def main():
         for p in processes:
             p.join(timeout=5)
             print(f"Worker {p.pid} join status: exitcode={p.exitcode}")
+        
 
         cap.release()
         cv2.destroyAllWindows()
