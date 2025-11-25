@@ -1,4 +1,4 @@
-#include "/home/firefly/Denoising-rk3588J/cpp_develop/hailort/hailort/libhailort/include/hailo/hailort.hpp"
+#include "../../hailort/hailort/libhailort/include/hailo/hailort.hpp"
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <map>
@@ -7,9 +7,9 @@
 
 using namespace hailort;
 
-const std::string HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef";
-const std::string INPUT_IMAGE = "/home/firefly/Denoising-rk3588J/data/20250113/20250113_0000.jpg";
-const std::string OUTPUT_IMAGE = "/home/firefly/Denoising-rk3588J/cpp_develop/model/singleInfer/output_reconstructed.jpg";
+const std::string HEF_PATH = "../dncnn_80ep_l9_4split_16pad.hef";
+const std::string INPUT_IMAGE = "20250113_0000.jpg";
+const std::string OUTPUT_IMAGE = "output_reconstructed.jpg";
 const cv::Size TARGET_RESOLUTION(960, 720);
 
 static inline cv::Rect ClampRect(const cv::Rect &r, int W, int H) {
@@ -155,8 +155,8 @@ cv::Mat run_inference_on_device(
 // =====================================================================
 int main()
 {
-    const std::string INPUT_IMAGE = "/home/firefly/Denoising-rk3588J/data/20250113/20250113_0000.jpg";
-    const std::string OUTPUT_IMAGE = "/home/firefly/Denoising-rk3588J/cpp_develop/model/singleInfer/output_interface.jpg";
+    const std::string INPUT_IMAGE = "20250113_0000.jpg";
+    const std::string OUTPUT_IMAGE = "output_interface.jpg";
 
     cv::Mat input = cv::imread(INPUT_IMAGE);
     if (input.empty()) {
