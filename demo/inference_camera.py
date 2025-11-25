@@ -29,7 +29,7 @@ from hailo_platform import (
 CAMERA_DEVICE_PATH = "/dev/video20"
 TARGET_RESOLUTION = (960, 720)
 TARGET_FPS_DISPLAY = 20           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
-HEF_PATH = "/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef"
+HEF_PATH = "dncnn_80ep_l9_4split_16pad.hef"
 NUM_DEVICES = 2
 BATCH_SIZE = 1
 # 将队列设小以降低延迟（优先丢弃旧帧），可根据设备吞吐微调为 2-6
