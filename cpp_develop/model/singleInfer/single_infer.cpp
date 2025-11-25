@@ -155,8 +155,8 @@ cv::Mat run_inference_on_device(
 // =====================================================================
 int main()
 {
-    const std::string INPUT_IMAGE = "20250113_0000.jpg";
-    const std::string OUTPUT_IMAGE = "output_interface.jpg";
+    const std::string INPUT_IMAGE = "../20250113_0000.jpg";
+    const std::string OUTPUT_IMAGE = "../output_interface.jpg";
 
     cv::Mat input = cv::imread(INPUT_IMAGE);
     if (input.empty()) {
