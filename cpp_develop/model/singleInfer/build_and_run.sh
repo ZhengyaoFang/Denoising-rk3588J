@@ -8,9 +8,9 @@
 PROJECT_NAME="single_infer"
 SRC_FILE="single_infer.cpp"
 BUILD_DIR="./build"
-HEF_PATH="/home/firefly/Denoising-rk3588J/demo/dncnn_80ep_l9_4split_16pad.hef"
-INPUT_IMAGE="/home/firefly/Denoising-rk3588J/data/20250113/20250113_0000.jpg"
-OUTPUT_IMAGE="/home/firefly/Denoising-rk3588J/cpp_develop/model/singleInfer/output.jpg"
+HEF_PATH="../dncnn_80ep_l9_4split_16pad.hef"
+INPUT_IMAGE="20250113_0000.jpg"
+OUTPUT_IMAGE="output.jpg"
 
 # 2. 路径检查
 if [ ! -f "$SRC_FILE" ]; then
@@ -29,7 +29,7 @@ if [ ! -f "$INPUT_IMAGE" ]; then
 fi
 
 # 3. 环境变量（如 HailoRT 未全局安装时需手动指定）
-export HAILORT_DIR="/home/firefly/Denoising-rk3588J/cpp_develop/hailort/hailort"
+export HAILORT_DIR="../../hailort/hailort"
 export OpenCV_DIR="/usr/lib/aarch64-linux-gnu/cmake/opencv4"
 
 if [ ! -d "$HAILORT_DIR" ]; then
