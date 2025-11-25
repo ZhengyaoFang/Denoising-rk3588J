@@ -7,9 +7,9 @@
 
 using namespace hailort;
 
-const std::string HEF_PATH = "../dncnn_80ep_l9_4split_16pad.hef";
-const std::string INPUT_IMAGE = "20250113_0000.jpg";
-const std::string OUTPUT_IMAGE = "output_reconstructed.jpg";
+const std::string HEF_PATH = "../../dncnn_80ep_l9_4split_16pad.hef";
+const std::string INPUT_IMAGE = "../20250113_0000.jpg";
+const std::string OUTPUT_IMAGE = "../output_reconstructed.jpg";
 const cv::Size TARGET_RESOLUTION(960, 720);
 
 static inline cv::Rect ClampRect(const cv::Rect &r, int W, int H) {
