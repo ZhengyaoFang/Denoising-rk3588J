@@ -1,3 +1,7 @@
 output/
 *.log
 build/
+demo_old
+models
+resnet_v2_18.hef
+
