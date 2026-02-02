@@ -1,0 +1,30 @@
+sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+
+sudo tee /etc/apt/sources.list > /dev/null <<'EOF'
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-backports main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-security main restricted universe multiverse
+EOF
+
+sudo apt update
+
+
+sudo apt install libv4l-dev v4l-utils
+
+export OPENCV_VIDEOIO_PRIORITY_V4L2=1000
+export OPENCV_VIDEOIO_DEBUG=1
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libv4l2.so
+
+python ISP_check.py
+
+sudo apt update
+sudo apt install -y \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly
+
+确认：
+gst-inspect-1.0 v4l2src

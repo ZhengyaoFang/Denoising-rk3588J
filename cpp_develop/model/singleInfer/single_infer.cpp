@@ -115,16 +115,19 @@ cv::Mat run_inference_on_device(
     if (!vdevice)
         throw std::runtime_error("Failed to create VDevice for chosen device");
 
-    // ===== 2. 图像预处理（缩放到模型输入尺寸）=====
+    // ===== 2. 加载 HEF 模型并配置网络 =====
+    auto hef = Hef::create(HEF_PATH);
+    if (!hef)
+        throw std::runtime_error("Failed to load HEF file");
+    
+    // ===== 【计时开始】 =====
+    auto start = std::chrono::steady_clock::now();
+
+    // ===== 3. 图像预处理（缩放到模型输入尺寸）=====
     const cv::Size model_input_size(960, 720);  // 模型固定输入分辨率
     cv::Mat input;
     cv::resize(input_bgr, input, model_input_size);
     input.convertTo(input, CV_32FC3);
-
-    // ===== 3. 加载 HEF 模型并配置网络 =====
-    auto hef = Hef::create(HEF_PATH);
-    if (!hef)
-        throw std::runtime_error("Failed to load HEF file");
 
     auto configure_params = vdevice.value()->create_configure_params(hef.value());
     auto network_groups = vdevice.value()->configure(hef.value(), configure_params.value());
@@ -144,6 +147,11 @@ cv::Mat run_inference_on_device(
         cv::resize(merged, resized, cv::Size(output_width, output_height), 0, 0, cv::INTER_AREA);
         return resized;
     }
+
+    // ===== 【计时结束 + 打印总耗时】 =====
+    auto end = std::chrono::steady_clock::now();
+    double total_time = std::chrono::duration<double, std::milli>(end - start).count();
+    std::cout << "Cost time: " << total_time << " ms" << std::endl;
 
     return merged;
 }

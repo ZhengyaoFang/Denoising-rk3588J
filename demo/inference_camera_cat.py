@@ -32,8 +32,9 @@ from hailo_platform import (
 # ---------------- 配置 ----------------
 CAMERA_DEVICE_PATH = "/dev/video20"
 TARGET_RESOLUTION = (960, 720)
-TARGET_FPS_DISPLAY = 20           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
-HEF_PATH = "dncnn_80ep_l9_4split_16pad.hef"
+TARGET_FPS_DISPLAY = 40           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
+
+HEF_PATH = "dncnn_lite_rgb_376x496_alpha0_8.hef"
 NUM_DEVICES = 2
 BATCH_SIZE = 1
 # 将队列设小以降低延迟（优先丢弃旧帧），可根据设备吞吐微调为 2-6
@@ -376,6 +377,17 @@ def main():
                         else:
                             cv2.imshow(WINDOW_NAME, latest_infer_frame)
 
+                        # FPS 统计与打印
+                        now = time.time()
+                        frame_count += 1
+                        delta = now - last_display_time
+                        last_display_time = now
+                        instant_fps = 1.0 / delta if delta > 0 else 0.0
+                        ema_fps = (alpha * instant_fps + (1 - alpha) * ema_fps) if ema_fps is not None else instant_fps
+                        if now - last_print_time >= 1.0:
+                            print(f"FPS: {ema_fps:.1f} (display) | infer: {infer_time*1000:.0f}ms")
+                            last_print_time = now
+
                     except Exception as e:
                         print(f"[Display warning] failed to display combined frame: {e}")
 
@@ -388,7 +400,7 @@ def main():
 
     except KeyboardInterrupt:
         print("KeyboardInterrupt -> exiting main loop")
-    finally:·
+    finally:
         # 结束：向 worker 发送终止信号
         for q in task_queues:
             try:
