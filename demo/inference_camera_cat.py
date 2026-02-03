@@ -34,7 +34,7 @@ CAMERA_DEVICE_PATH = "/dev/video20"
 TARGET_RESOLUTION = (960, 720)
 TARGET_FPS_DISPLAY = 40           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
 
-HEF_PATH = "dncnn_lite_rgb_376x496_alpha0_8.hef"
+HEF_PATH = "dncnn_ch32_lite_rgb_376x496_alpha0_5.hef.hef"
 NUM_DEVICES = 2
 BATCH_SIZE = 1
 # 将队列设小以降低延迟（优先丢弃旧帧），可根据设备吞吐微调为 2-6

@@ -14,6 +14,7 @@ import numpy as np
 import multiprocessing as mp
 from multiprocessing import Manager
 import queue
+import argparse
 from datetime import datetime
 from hailo_platform import (
     HEF,
@@ -33,10 +34,16 @@ from hailo_platform import (
 CAMERA_DEVICE_PATH = "/dev/video20"
 TARGET_RESOLUTION = (960, 720)
 TARGET_FPS_DISPLAY = 40           # 显示目标FPS（仅用于sleep/画面节奏，不强制摄像头）
-
-HEF_PATH = "dncnn_lite_rgb_376x496_alpha0_8.hef"
+# 去噪强度 -> HEF 文件名（与 demo 目录下文件名一致）
+STRENGTH_TO_HEF = {
+    0.3: "dncnn_ch32_lite_rgb_376x496_alpha0_3.hef",
+    0.5: "dncnn_ch32_lite_rgb_376x496_alpha0_5.hef",
+    0.8: "dncnn_ch32_lite_rgb_376x496_alpha0_8.hef",
+    1.0: "dncnn_ch32_lite_rgb_376x496_alpha1_0.hef",
+}
 NUM_DEVICES = 2
 BATCH_SIZE = 1
+ENHANCE_HEF_PATH = "enhance.hef"
 # 将队列设小以降低延迟（优先丢弃旧帧），可根据设备吞吐微调为 2-6
 QUEUE_MAX_SIZE = 1
 # 主循环最长运行（秒），设为 None 则无限运行直到按 q 退出
@@ -44,6 +51,27 @@ RUN_DURATION = None
 
 # 显示窗口名字
 WINDOW_NAME = "Live Denoise (Original | Inferred)"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="实时去噪（低延迟）")
+    parser.add_argument(
+        "--strength", "-s",
+        type=float,
+        choices=[0.3, 0.5, 0.8, 1.0],
+        default=0.5,
+        help="去噪强度，对应加载的 HEF 模型 (默认: 0.3)",
+    )
+    return parser.parse_args()
+
+
+def get_hef_path(strength):
+    """根据去噪强度返回对应 HEF 的完整路径（脚本所在 demo 目录）。"""
+    name = STRENGTH_TO_HEF.get(strength)
+    if name is None:
+        raise ValueError(f"不支持的强度 {strength}，可选: 0.3, 0.5, 0.8, 1.0")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
 
 def process_frame(frame):
     """
@@ -54,11 +82,15 @@ def process_frame(frame):
     start_time = time.time()
     
     # 1. 调整分辨率（确保与目标一致，后续拼接时尺寸统一）
-    frame_resized = cv2.resize(
-        frame, 
-        dsize=TARGET_RESOLUTION, 
-        interpolation=cv2.INTER_AREA  # 高质量插值（与原代码PIL.LANCZOS对应）
-    )
+    # 如果frame的宽小于496或者高小于376，则进行resize。否则直接返回原帧。
+    # if frame.shape[1] < 496 or frame.shape[0] < 376:
+    #     frame_resized = cv2.resize(
+    #         frame, 
+    #         dsize=TARGET_RESOLUTION, 
+    #         interpolation=cv2.INTER_AREA  # 高质量插值（与原代码PIL.LANCZOS对应）
+    #     )
+    # else:
+    frame_resized = frame
     
     # 2. BGR转RGB（cv2默认BGR，模型需要RGB）
     #frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
@@ -150,7 +182,7 @@ def run_inference(device, input_batch):
 
 def split_and_stack(batch_tensor):
     """
-    将形状为[1, 720, 960, 3]的图像数组分割为4张子图并堆叠为[4, 360, 480, 3]
+    将图像数组分割为4张子图并堆叠为[4, 360, 480, 3]
     
     参数:
         batch_tensor: 形状为[1, 720, 960, 3]的numpy数组
@@ -158,9 +190,7 @@ def split_and_stack(batch_tensor):
     返回:
         形状为[4, 360, 480, 3]的numpy数组
     """
-    # 检查输入形状是否正确
-    if batch_tensor.shape != (1, 720, 960, 3):
-        raise ValueError(f"输入数组形状必须为[1, 720, 960, 3], 实际输入数组形状为{batch_tensor.shape}")
+
     
     # 移除批次维度，得到[720, 960, 3]
     image = batch_tensor[0]
@@ -173,46 +203,114 @@ def split_and_stack(batch_tensor):
     # 左上角
     sub1 = image[:sub_height+16, :sub_width+16, :]
     # 左下角
-    sub2 = image[sub_height-16:, :sub_width+16, :]
+    sub2 = image[-(sub_height+16):, :sub_width+16, :]
     # 右上角
-    sub3 = image[:sub_height+16, sub_width-16:, :]
+    sub3 = image[:sub_height+16, -(sub_width+16):, :]
     # 右下角
-    sub4 = image[sub_height-16:, sub_width-16:, :]
+    sub4 = image[-(sub_height+16):, -(sub_width+16):, :]
     
-    # 堆叠成[4, 360, 480, 3]的数组
+    # 堆叠成[4, 376, 496, 3]的数组
     stacked = np.stack([sub1, sub2, sub3, sub4], axis=0)
     
     return stacked
 
-def stack_to_original(sub_images):
-    """
-    将形状为[4, 360, 480, 3]的子图数组拼接为原始图像[1, 720, 960, 3]
-    
-    参数:
-        sub_images: 形状为[4, 360, 480, 3]的numpy数组，包含4个子图
-                    顺序应为[左上, 左下, 右上, 右下]
-        
-    返回:
-        形状为[1, 720, 960, 3]的numpy数组，原始图像
-    """
+def stack_to_original(sub_images, original_image):
     # 检查输入形状是否正确
     if sub_images.shape != (4, 376, 496, 3):
         raise ValueError(f"输入数组形状必须为[4, 360, 480, 3], 实际形状为{sub_images.shape}")
-    
+    if original_image.shape[0] != 1:
+        original_image = np.expand_dims(original_image, axis=0)
     # 提取4个子图
     sub1, sub2, sub3, sub4 = sub_images[0], sub_images[1], sub_images[2], sub_images[3]
+    # 将四个子图替换original_image的对应区域
+    original_image[0, :360,:480,:] = sub1[:360,:480,:]
+    original_image[0, -360:,:480,:] = sub2[16:,:480,:]
+    original_image[0, :360,-480:,:] = sub3[:360,16:,:]
+    original_image[0, -360:,-480:,:] = sub4[16:,16:,:]
     
-    # 水平拼接第一行（上半部分）
-    top_row = np.concatenate([sub1[:360,:480,:], sub3[:360,16:]], axis=1)
-    
-    # 水平拼接第二行（下半部分）
-    bottom_row = np.concatenate([sub2[16:,:480,:], sub4[16:, 16:,:]], axis=1)
-    
-    # 垂直拼接两行，得到完整图像
-    full_image = np.concatenate([top_row, bottom_row], axis=0)
-    
-    # 添加批次维度，形状变为[1, 720, 960, 3]
-    return np.expand_dims(full_image, axis=0)
+    # 添加批次维度
+    return original_image.astype(np.uint8)
+
+
+def run_enhance_on_image(device, denoised_img):
+    """对单张去噪图用 enhance 模型处理（分 4 块推理再拼回），返回 (720, 960, 3) BGR。"""
+    if denoised_img.shape[0] != 720 or denoised_img.shape[1] != 960:
+        denoised_img = cv2.resize(denoised_img, TARGET_RESOLUTION)
+    batch = np.expand_dims(denoised_img.astype(np.float32), axis=0)
+    blocks = split_and_stack(batch)
+    out_blocks, _ = run_inference(device, blocks)
+    out_blocks, _ = run_inference(device, out_blocks.astype(np.float32))
+    out_blocks, _ = run_inference(device, out_blocks.astype(np.float32))
+    result = stack_to_original(out_blocks, denoised_img.copy())
+    return result[0]
+
+
+def process_pending_denoised_with_enhance(base_dir):
+    """对 grab/denoised 中尚未在 grab/enhanced 中有对应结果的图像跑 enhance，并保存 original|denoised|enhanced 拼接图到 grab/enhanced。"""
+    dir_original = os.path.join(base_dir, "grab", "original")
+    dir_denoised = os.path.join(base_dir, "grab", "denoised")
+    dir_enhanced = os.path.join(base_dir, "grab", "enhanced")
+    if not os.path.isdir(dir_denoised):
+        return
+    os.makedirs(dir_enhanced, exist_ok=True)
+    pending = []
+    for name in os.listdir(dir_denoised):
+        if not name.endswith((".png", ".jpg", ".jpeg")):
+            continue
+        path_enhanced = os.path.join(dir_enhanced, name)
+        if os.path.isfile(path_enhanced):
+            continue
+        path_denoised = os.path.join(dir_denoised, name)
+        path_original = os.path.join(dir_original, name)
+        if not os.path.isfile(path_denoised) or not os.path.isfile(path_original):
+            continue
+        pending.append((name, path_original, path_denoised, path_enhanced))
+    if not pending:
+        return
+    if not os.path.isfile(ENHANCE_HEF_PATH):
+        print(f"Enhance HEF not found: {ENHANCE_HEF_PATH}, skip pending enhance.")
+        return
+    try:
+        device = init_device(ENHANCE_HEF_PATH, 0)
+    except Exception as e:
+        # 等待3秒后重试
+        time.sleep(3)
+        try:
+            device = init_device(ENHANCE_HEF_PATH, 0)
+        except Exception as e:
+            print(f"Enhance device init failed: {e}, skip pending enhance.")
+            return
+    try:
+        for name, path_original, path_denoised, path_enhanced in pending:
+            try:
+                original = cv2.imread(path_original)
+                denoised = cv2.imread(path_denoised)
+                if original is None or denoised is None:
+                    continue
+                enhanced = run_enhance_on_image(device, denoised)
+                h, w = original.shape[:2]
+                if (denoised.shape[0], denoised.shape[1]) != (h, w):
+                    denoised = cv2.resize(denoised, (w, h))
+                if (enhanced.shape[0], enhanced.shape[1]) != (h, w):
+                    enhanced = cv2.resize(enhanced, (w, h))
+                combined = np.concatenate((original, denoised, enhanced), axis=1)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.8
+                thickness = 2
+                color = (255, 255, 255)
+                cv2.putText(combined, "Original", (20, h - 20), font, font_scale, color, thickness)
+                cv2.putText(combined, "Denoised", (w + 20, h - 20), font, font_scale, color, thickness)
+                cv2.putText(combined, "Enhanced", (2 * w + 20, h - 20), font, font_scale, color, thickness)
+                cv2.imwrite(path_enhanced, combined)
+                print(f"Enhanced saved: {path_enhanced}")
+            except Exception as e:
+                print(f"Enhance failed for {name}: {e}")
+    finally:
+        try:
+            device["target"].release()
+        except Exception:
+            pass
+
 
 # ---------------- worker_process (更简单的版本) ----------------
 def worker_process(device_id, task_queue, result_queue, hef_path):
@@ -236,6 +334,7 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
 
                 try:
                     batch_tensor = split_and_stack(ori_tensor)
+                    
                     input_data = {device["input_vstream_info"].name: batch_tensor}
 
                     start_time = time.time()
@@ -243,7 +342,7 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
                     infer_time = time.time() - start_time
 
                     infer_tensors = infer_results[device["output_vstream_info"].name]
-                    infer_tensors = stack_to_original(infer_tensors)
+                    infer_tensors = stack_to_original(infer_tensors, ori_tensor.copy())
 
                     result_queue.put((batch_index, actual_batch_size, infer_time, infer_tensors))
 
@@ -264,10 +363,14 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
 
 # ---------------- 主流程 (低延迟显示) ----------------
 def main():
+    args = parse_args()
+    hef_path = get_hef_path(args.strength)
+    if not os.path.isfile(hef_path):
+        raise FileNotFoundError(f"HEF 不存在: {hef_path}")
 
     mp.set_start_method("spawn", force=True)
 
-    print("启动实时显示模式 (低延迟, 丢帧优先)")
+    print(f"启动实时显示模式 (低延迟, 丢帧优先) | 去噪强度: {args.strength} | HEF: {hef_path}")
 
     # ---------------- 启动 worker 进程 ----------------
     task_queues = [mp.Queue(maxsize=QUEUE_MAX_SIZE) for _ in range(NUM_DEVICES)]
@@ -275,7 +378,7 @@ def main():
 
     processes = []
     for dev_id in range(NUM_DEVICES):
-        p = mp.Process(target=worker_process, args=(dev_id, task_queues[dev_id], result_queue, HEF_PATH))
+        p = mp.Process(target=worker_process, args=(dev_id, task_queues[dev_id], result_queue, hef_path))
         p.start()
         processes.append(p)
     time.sleep(1.0)
@@ -286,8 +389,8 @@ def main():
         raise RuntimeError(f"无法打开摄像头: {CAMERA_DEVICE_PATH}")
 
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, TARGET_RESOLUTION[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_RESOLUTION[1])
+    # cap.set(cv2.CAP_PROP_FRAME_WIDTH, TARGET_RESOLUTION[0])
+    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_RESOLUTION[1])
     cap.set(cv2.CAP_PROP_FPS, 60)
 
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -299,6 +402,7 @@ def main():
     result_cache = {}
     latest_infer_frame = None
     latest_original_frame = None
+    last_display_original = None  # 上次显示用的原图，用于 latest_original_frame 为 None 时回退
     last_display_time = time.time()
     ema_fps = None
     alpha = 0.1  # EMA smoothing for fps
@@ -374,13 +478,14 @@ def main():
                             grab_buffer.pop(0)
 
                     try:
-                        if latest_original_frame is not None:
-                            h1, w1 = latest_original_frame.shape[:2]
+                        orig_for_display = latest_original_frame if latest_original_frame is not None else last_display_original
+                        if orig_for_display is not None:
+                            if latest_original_frame is not None:
+                                last_display_original = latest_original_frame.copy()
+                            h1, w1 = orig_for_display.shape[:2]
                             h2, w2 = latest_infer_frame.shape[:2]
-                            if (h1, w1) != (h2, w2):
-                                latest_infer_frame = cv2.resize(latest_infer_frame, (w1, h1))
-
-                            combined = np.concatenate((latest_original_frame, latest_infer_frame), axis=1)
+                            infer_resized = cv2.resize(latest_infer_frame, (w1, h1)) if (h1, w1) != (h2, w2) else latest_infer_frame
+                            combined = np.concatenate((orig_for_display, infer_resized), axis=1)
                             cv2.imshow(WINDOW_NAME, combined)
                         else:
                             cv2.imshow(WINDOW_NAME, latest_infer_frame)
@@ -393,7 +498,7 @@ def main():
                         instant_fps = 1.0 / delta if delta > 0 else 0.0
                         ema_fps = (alpha * instant_fps + (1 - alpha) * ema_fps) if ema_fps is not None else instant_fps
                         if now - last_print_time >= 1.0:
-                            print(f"FPS: {ema_fps:.1f} (display) | infer: {infer_time*1000:.0f}ms")
+                            print(f"FPS: {min(ema_fps, 60):.1f} (display) | infer: {infer_time*1000:.0f}ms")
                             last_print_time = now
 
                     except Exception as e:
@@ -404,43 +509,21 @@ def main():
                         print("User requested exit.")
                         raise KeyboardInterrupt
                     elif key == ord('g'):
-                        # 使用 buffer 中最近的 4 帧做加权平均，并与当前帧拼接后保存
-                        if len(grab_buffer) >= 4 and latest_original_frame is not None:
-                            # 取最近的 4 帧
-                            frames_to_avg = grab_buffer[-4:]
-                            ref = frames_to_avg[0]
-                            h, w = ref.shape[:2]
-                            acc = np.zeros_like(ref, dtype=np.float32)
-                            for f in frames_to_avg:
-                                if f.shape[:2] != (h, w):
-                                    f_resized = cv2.resize(f, (w, h))
-                                else:
-                                    f_resized = f
-                                acc += f_resized.astype(np.float32)
-                            avg_frame = (acc / 4.0).astype(np.uint8)
-
-                            # 当前推理帧尺寸对齐后拼接
-                            if latest_original_frame.shape[:2] != (h, w):
-                                cur_frame = cv2.resize(latest_original_frame, (w, h))
-                            else:
-                                cur_frame = latest_original_frame
-                            grab_img = np.concatenate((cur_frame, avg_frame), axis=1)
-                            h_img, w_img = grab_img.shape[:2]
-                            font = cv2.FONT_HERSHEY_SIMPLEX
-                            font_scale = 0.8
-                            thickness = 2
-                            color = (255, 255, 255)
-                            cv2.putText(grab_img, "Original", (20, h_img - 20), font, font_scale, color, thickness)
-                            cv2.putText(grab_img, "Grab", (w + 20, h_img - 20), font, font_scale, color, thickness)
-
-                            save_dir = os.path.join(os.path.dirname(__file__), "grab")
-                            os.makedirs(save_dir, exist_ok=True)
+                        if latest_original_frame is not None and latest_infer_frame is not None:
+                            base_dir = os.path.dirname(os.path.abspath(__file__))
+                            dir_original = os.path.join(base_dir, "grab", "original")
+                            dir_denoised = os.path.join(base_dir, "grab", "denoised")
+                            os.makedirs(dir_original, exist_ok=True)
+                            os.makedirs(dir_denoised, exist_ok=True)
                             timestamp = time.strftime("%Y%m%d_%H%M%S")
-                            save_path = os.path.join(save_dir, f"grab_{timestamp}.png")
-                            cv2.imwrite(save_path, grab_img)
-                            print(f"Grab image saved to {save_path}")
+                            name = f"grab_{timestamp}.png"
+                            path_original = os.path.join(dir_original, name)
+                            path_denoised = os.path.join(dir_denoised, name)
+                            cv2.imwrite(path_original, latest_original_frame)
+                            cv2.imwrite(path_denoised, latest_infer_frame)
+                            print("Captured. Processing will start after the real-time denoising program ends.")
                         else:
-                            print("Grab buffer 不足 4 帧，无法保存。")
+                            print("No frame to capture.")
 
                 except queue.Empty:
                     break
@@ -463,6 +546,8 @@ def main():
 
         cap.release()
         cv2.destroyAllWindows()
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        process_pending_denoised_with_enhance(base_dir)
         print("Cleaned up and exiting.")
 
 if __name__ == "__main__":

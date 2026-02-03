@@ -5,5 +5,4 @@ demo_old
 models
 resnet_v2_18.hef
 develop
-demo/grab/*.jpg
-demo/grab/*.png
+demo/grab
