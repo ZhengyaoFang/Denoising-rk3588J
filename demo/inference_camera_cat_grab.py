@@ -270,18 +270,25 @@ def process_pending_denoised_with_enhance(base_dir):
     if not os.path.isfile(ENHANCE_HEF_PATH):
         print(f"Enhance HEF not found: {ENHANCE_HEF_PATH}, skip pending enhance.")
         return
-    try:
-        print("Waiting ...")
-        time.sleep(10)
-        device = init_device(ENHANCE_HEF_PATH, 0)
-    except Exception as e:
-        # 等待3秒后重试
-        time.sleep(8)
+    
+    retry_count = 0  # 记录重试次数
+    max_retry_times = 3
+    while True:
         try:
+            print("Waiting ...")
+            time.sleep(5)
             device = init_device(ENHANCE_HEF_PATH, 0)
+            print("Enhance device init success.")
+            break
         except Exception as e:
-            print(f"Enhance device init failed: {e}, skip pending enhance.")
-            return
+            retry_count += 1
+            # 检查是否达到最大重试次数
+            if max_retry_times is not None and retry_count >= max_retry_times:
+                print(f"Enhance device init failed after {max_retry_times} retries: {e}, skip pending enhance.")
+                return None
+            # 未达到最大重试次数，继续重试
+            print(f"Enhance device init failed (retry {retry_count}): {e}, will retry after 5 seconds...")
+            time.sleep(5)
     try:
         for name, path_original, path_denoised, path_enhanced in pending:
             try:
@@ -361,7 +368,7 @@ def worker_process(device_id, task_queue, result_queue, hef_path):
                 device["target"].release()
             except Exception:
                 pass
-        print(f"[Worker {device_id}] exiting")
+            print(f"[Worker {device_id}] exiting")
 
 # ---------------- 主流程 (低延迟显示) ----------------
 def main():
@@ -542,7 +549,7 @@ def main():
 
         # 等待进程退出
         for p in processes:
-            p.join(timeout=5)
+            p.join(timeout=15)
             print(f"Worker {p.pid} join status: exitcode={p.exitcode}")
         
 
