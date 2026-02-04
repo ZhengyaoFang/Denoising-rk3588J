@@ -271,10 +271,12 @@ def process_pending_denoised_with_enhance(base_dir):
         print(f"Enhance HEF not found: {ENHANCE_HEF_PATH}, skip pending enhance.")
         return
     try:
+        print("Waiting ...")
+        time.sleep(10)
         device = init_device(ENHANCE_HEF_PATH, 0)
     except Exception as e:
         # 等待3秒后重试
-        time.sleep(3)
+        time.sleep(8)
         try:
             device = init_device(ENHANCE_HEF_PATH, 0)
         except Exception as e:
